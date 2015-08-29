@@ -1,0 +1,256 @@
+﻿+--------------------+
+|       CS 162       |
+| PROJECT 1: THREADS |
+|   DESIGN DOCUMENT  |       
++--------------------+
+                                   
+Michele Vascelli <m.vascelli@berkeley.edu>
+
+
+ALARM CLOCK
+=============
+
+
+---- DATA STRUCTURES ----
+
+
+>> A1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+/** line 85, timer.c: A struct used to represent a thread node for the sleeping_threads list. 
+The wakeup_time, and the thread’s own pointer fields are used to wake-up the thread. **/
+struct thread_node {
+        struct list_elem elem;
+        int64_t wakeup_time;
+        struct thread* sleeper;
+};
+
+/** line 102, timer.c: A list used to hold threads while they are sleeping. 
+Threads will be stored in ascending order of their wake-up time. **/
+static struct list sleeping_threads;
+
+
+
+---- ALGORITHMS ----
+
+
+>> A2: Briefly describe what happens in a call to timer_sleep(),
+>> including the effects of the timer interrupt handler.
+
+timer_sleep() creates a thread_node and stores both the pointer and the planned wakeup time 
+for the current thread in its fields. Interrupt functionality is momentarily disabled to 
+insert the thread_node in the sleeping_threads list, and to put the thread to sleep.
+timer_interrupt() checks the sleeping_threads list at every tick, and wakes up all sleeping 
+threads whose wake-up time is less than or equal to the current time.
+
+
+>> A3: What steps are taken to minimize the amount of time spent in
+>> the timer interrupt handler?
+
+timer_sleep() stores thread_node’s in the sleeping_threads list so that the next threads to 
+wake-up will be at the front of the list. timer_interrupt() will thus be able to quickly 
+remove them and wake them up without searching the whole list.
+
+
+
+---- SYNCHRONIZATION ----
+
+
+>> A4: How are race conditions avoided when multiple threads call
+>> timer_sleep() simultaneously?
+
+Interrupts are momentarily disabled to avoid race conditions. timer_sleep() disables interrupts 
+before inserting a thread_node into the sleeping_thread list, and before calling thread_block(). 
+In doing so, those operations are not disturbed, and can execute safely.
+
+
+>> A5: How are race conditions avoided when a timer interrupt occurs
+>> during a call to timer_sleep()?
+
+As explained in A4, timer_sleep() disables interrupts before executing critical statements. 
+As a result, there is no interference from any interrupt during that brief moment, and those
+critical operations are executed atomically.
+
+
+
+---- RATIONALE ----
+
+
+>> A6: Why did you choose this design?  In what ways is it superior to
+>> another design you considered?
+
+An initial design of timer_sleep() inserted thread_node’s at the back of the sleeping_threads 
+list, and then utilized the list_sort function to keep the list ordered. This approach was later
+abandoned due to its inefficiency, and was later replaced by a single call to the function 
+list_insert_ordered(), which operates in O(n), rather than O(n*log(n)).
+The use of locks in timer_sleep was also contemplated, but given that it was still required to
+momentarily disable interrupts to execute thread_block(), then a choice was made to simplify the
+design and only include interruption disabling.
+
+
+
+
+
+PRIORITY SCHEDULING
+===================
+
+
+---- DATA STRUCTURES ----
+
+
+>> B1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+struct thread   /* line 83, threads.h */
+ {       --- New fields ---
+
+
+         /* Stores base priority of thread */
+         int original_priority;
+
+
+         /* Stores lock which thread is waiting on */
+         struct lock *needed_lock;
+
+
+         /* Stores list of locks held by thread */
+         struct list locks_owned;
+
+ };
+
+
+>> B2: Explain the data structure used to track priority donation.
+
+The final chosen data structure provided for a much more streamlined and clean implementation. 
+Instead of using two additional lists, we modified thread struct to use only a list of owned locks,
+an original priority field, and a field to hold the lock which this thread is currently waiting for.
+These new fields allow us to both propagate donation during lock acquire operations, and to assign
+appropriate priorities to threads during lock releases.
+
+
+>> Use ASCII art to diagram a nested donation.  (Alternately, submit a
+>> .png file.)
+
+
+      x x    original_priority=8   x x    original_priority=5
+    x     x  waiting on lock (2) x     x  waiting on lock (2)
+   x   D   x                    x   C   x
+    x     x                      x     x
+      x x  ↘                       x x                          A initialized;
+             ↘                      |                           B initialized;
+               ↘                    |                           C initialized;
+                 ↘                  |                           D initialized;
+                   ↘ 8 (donated)    |  5 (donated)              E initialized;
+                     ↘              |
+                       ↘            |
+                         ↘          |
+                           ↘        |
+                             ↘      |
+                               ↘    |
+                                 ↘  ↓
+      x x                          x x                       x x
+    x     x   10 (donated)       x (2) x   10 (donated)    x     x
+   x   E   x -----------------> x   B   x --------------> x   A   x
+    x     x                      x (3) x                   x (1) x
+      x x                          x x                       x x
+           original_priority=10         original_priority=3       original_priority=1
+           waiting on lock (3)          priority                  priority=10
+                                           = max(10,8,5)          owns lock (1)
+                                           = 10
+                                        owns lock (2) & (3)
+                                        waiting on lock (1)
+
+
+
+---- ALGORITHMS ----
+
+
+>> B3: How do you ensure that the highest priority thread waiting for
+>> a lock, semaphore, or condition variable wakes up first?
+
+The semaphore struct waiters list will be implemented as a priority queue, where the 
+front node will be the thread with the highest priority. To that end we opted to sort 
+the semaphore waiters list in descending order right before picking the front node. 
+We also created helper functions in synch.h which help us to deliver the highest 
+priority threads directly to sema-up and cond signal.
+
+
+>> B4: Describe the sequence of events when a call to lock_acquire()
+>> causes a priority donation.  How is nested donation handled?
+
+Before calling sema_down(), a thread should check whether the lock is already owned or not. 
+If it is free, then the calling thread can quickly acquire ownership of the lock after 
+returning from sema_down(), if not, we must make sure that the priority of the current owner 
+of the lock is not lower than the priority of the thread currently trying to acquire the lock. 
+If it is not lower then we have no donation, but if it is indeed lower, we must run through 
+a loop which will donate the current calling thread’s priority to all the threads which are 
+needed to run in order for the calling thread to finally acquire the lock. The while loop will 
+end either when there is no more thread up the chain of threads, or when a higher priority than 
+the current calling thread’s priority is found.  At this point the calling thread will continue 
+execution in lock_acquire() and will call sema_down(), which will put it to sleep to allow the 
+actual lock holder to execute and eventually release the lock. Once the lock is released, the 
+blocked thread wakes up, and immediately acquires ownership of the lock. Before ending execution 
+of the function, the new owner thread stores its lock in its list locks_owned. 
+
+
+>> B5: Describe the sequence of events when lock_release() is called
+>> on a lock that a higher-priority thread is waiting for.
+
+When a thread releases a lock, it first relinquishes ownership of the lock, by setting the locks 
+holder field to null, then it updates its list of owned locks by removing this particular lock. 
+If this thread’s owned list is now empty, then it means that the releasing thread can reassume its 
+original priority(pre-donation priority), otherwise we must determine the new priority to assign to
+the thread. This new priority value is determined by finding the highest priority value of any thread 
+which is currently waiting on any lock currently owned by the thread. These locks are stored in list 
+locks_owned, and for each lock: lock->semaphore->waiters.
+Once found, this priority value will be assigned to the thread only if it is actually higher than the
+thread original priority, otherwise it remains unchanged.
+Finally sema-up is called, and the next highest priority thread is scheduled, and thus allowed to 
+acquire a needed lock.
+
+
+
+---- SYNCHRONIZATION ----
+
+
+>> B6: Describe a potential race in thread_set_priority() and explain
+>> how your implementation avoids it.  
+
+When a low priority thread has acquired a lock on a critical section and there is a higher priority 
+thread which requires the lock, a race condition may arise in thread_set_priority() when the thread 
+tries to donate priority to it. Even in the basic implementation of thread_set_priority(), the instruction
+set is not atomic and may be interrupted midway. For example, a low priority thread L is about to change 
+its priority to a higher value, but midway through execution, the scheduler changes context to a newly 
+created thread H which proceeds to wait on L for a lock. Since L has not had a chance to change its priority
+yet to a higher priority, H donates its priority to L, which proceeds to reset its priority to the argument 
+new_priority in thread_set_priority() due to the race condition.
+
+
+>> Can you use a lock to avoid this race?
+
+To avoid this race condition we can disable interrupts just before the use of thread_set_priority() and 
+update the priority if it is higher than the currently assigned priority, enabling interrupts afterwards. 
+This ensures that no thread comes in and attempts to donate priority while a thread is updating its 
+priority level. We are not confident that a lock would be a good attempt as it might result in deadlock 
+if one thread in the middle of thread_set_priority() is interrupted and another thread attempts to donate
+to it but is stuck waiting for the lock to be released.
+
+
+
+---- RATIONALE ----
+
+
+>> B7: Why did you choose this design?  In what ways is it superior to
+>> another design you considered?
+
+We mainly focused on reusing the data structures api we were given, even though at times it proved hard to do 
+so, given the inherent complexity of those api’s. In the end, the goal was to introduce as little additional 
+data structures as possible, and we accomplished this very goal by choosing more conservative implementations. 
+For example we opted to introduce a list and two fields to the thread structure in thread.h, as opposed to using
+multiple lists as we initially planned. Also we opted toward a solution which focused on modifying only the thread 
+struct, and thus leaving the lock struct in synch.h unchanged.    
+Finally, we worried about the remaining possibility of deadlock, and we planned to implement a donation_level 
+counter, but following the directions of our instructors, we decided not to implement them.
+
