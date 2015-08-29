@@ -1,0 +1,2 @@
+Run 'make' in subdirectories: threads userprog vm filesys.
+This top-level make has only 'clean' targets.
